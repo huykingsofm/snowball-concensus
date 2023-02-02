@@ -22,6 +22,8 @@ trap_ctrlc() {
 
 trap trap_ctrlc INT
 
+START=$(date +'%s')
+
 for i in $(seq 1 $N_PROCESS)
 do
     ./consensus --n $N_ELEMENTS --folder storage --p $(($i+$MIN_PORT-1)) --minP $MIN_PORT --maxP $MAX_PORT &> logs/consensus_$(($i+$MIN_PORT-1)).log &
@@ -34,5 +36,6 @@ for pid in ${pids[*]}; do
     echo "$pid stopped"
 done
 
+echo "Time slapse: $(($(date +'%s') - $START))s"
 echo "All nodes stopped!!"
 echo "Check final results in storage/[port].result directory"
