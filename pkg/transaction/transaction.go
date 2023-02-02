@@ -180,3 +180,7 @@ func (c *ConcensusTransaction) Decide(ix uint, tx entity.Transaction) error {
 	c.decided = append(c.decided, tx)
 	return nil
 }
+
+func (c *ConcensusTransaction) Done() bool {
+	return len(c.decided) == len(c.conflict)
+}

@@ -3,9 +3,7 @@ package consensus
 import (
 	"fmt"
 	"log"
-	"math/rand"
-	"time"
-	"unsafe"
+	"strconv"
 
 	"github.com/huykingsofm/snowball-concensus/internal/usecase/consensus"
 	"github.com/huykingsofm/snowball-concensus/pkg/p2p"
@@ -32,10 +30,11 @@ func New(folder string, port, minPort, maxPort int, n, k, alpha, beta uint) App 
 	host, err := p2p.New("localhost", port, minPort, maxPort)
 	xycond.AssertNil(err)
 
-	repo := transaction.New(folder+"/"+generateRandomString(10), n)
+	repo := transaction.New(folder+"/"+strconv.Itoa(port)+".result", n)
 	usecase := consensus.New(repo, host, k, alpha, beta)
 
 	host.SetHandler(usecase.Answer)
+	host.SetDone(repo.Done)
 
 	return App{
 		host:     host,
@@ -55,39 +54,11 @@ func (a App) Run() {
 		} else {
 			i++
 		}
-		log.Println("[INFO] Sleep sometime")
-		time.Sleep(time.Second)
+		log.Println("[INFO] Decided transaction", i, ", go to the next transaction")
 	}
 
 	if err := a.repo.Commit(); err != nil {
 		panic(err)
 	}
 	log.Println("[INFO] Commited")
-}
-
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-)
-
-var randomSrc = rand.NewSource(time.Now().UnixNano())
-
-func generateRandomString(n int) string {
-	b := make([]byte, n)
-
-	for i, cache, remain := n-1, randomSrc.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = randomSrc.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
-	}
-
-	return *(*string)(unsafe.Pointer(&b))
 }

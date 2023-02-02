@@ -13,12 +13,14 @@ import (
 )
 
 type Host struct {
-	listener net.Listener
-	minPort  int
-	maxPort  int
-	orders   []int
-	idxOrder int
-	handler  func(ix uint) (entity.Transaction, error)
+	listener    net.Listener
+	port        int
+	minPort     int
+	maxPort     int
+	orders      []int
+	idxOrder    int
+	handler     func(ix uint) (entity.Transaction, error)
+	doneHandler func() bool
 }
 
 func New(host string, port, minPort, maxPort int) (*Host, error) {
@@ -30,6 +32,7 @@ func New(host string, port, minPort, maxPort int) (*Host, error) {
 
 	h := &Host{
 		listener: listener,
+		port:     port,
 		minPort:  minPort,
 		maxPort:  maxPort,
 		orders:   rand.Perm(maxPort - minPort),
@@ -44,8 +47,23 @@ func (h *Host) SetHandler(f func(ix uint) (entity.Transaction, error)) {
 	h.handler = f
 }
 
+func (h *Host) SetDone(f func() bool) {
+	h.doneHandler = f
+}
+
 func (h *Host) Close() {
-	time.Sleep(600)
+	port := h.minPort
+
+	for port < h.maxPort {
+		log.Println("[INFO] Wait for process", port, "commits...")
+		if h.askDone(port) || port == h.port {
+			port++
+		} else {
+			time.Sleep(time.Second)
+		}
+	}
+
+	log.Println("[INFO] Close the connections")
 	h.listener.Close()
 }
 
@@ -70,13 +88,11 @@ func (h *Host) Ask(k, ix uint) ([]entity.Transaction, error) {
 				return nil, err
 			}
 
-			log.Println("[WARNING] Can ask peer:", err)
+			log.Println("[WARNING] Can not ask peer:", err)
 			nAttemps--
 		} else {
 			preferences = append(preferences, p)
 		}
-
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	return preferences, nil
@@ -90,6 +106,10 @@ func (h *Host) askOne(ix uint64) (entity.Transaction, error) {
 
 	port := h.orders[h.idxOrder] + h.minPort
 	h.idxOrder++
+
+	if port == h.port {
+		return entity.Transaction{}, errors.New("self connection")
+	}
 
 	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
@@ -105,19 +125,46 @@ func (h *Host) askOne(ix uint64) (entity.Transaction, error) {
 		return entity.Transaction{}, err
 	}
 
-	log.Println("[DEBUG] Asking peer", port, "at", ix, "returns", value)
+	log.Println("[DEBUG] Asking peer", port, "at index", ix, "returns", value)
 	return entity.Transaction{Value: int(value)}, nil
+}
+
+func (h *Host) askDone(port int) bool {
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		return true
+	}
+
+	value := int64(-1)
+	if err := binary.Write(conn, binary.BigEndian, value); err != nil {
+		return false
+	}
+
+	if err := binary.Read(conn, binary.BigEndian, &value); err != nil {
+		return false
+	}
+
+	return value == 1
 }
 
 func (h *Host) handleConnection(conn net.Conn) error {
 	defer conn.Close()
-	if h.handler == nil {
-		return errors.New("not setup handler")
-	}
 
-	var ix uint64
+	var ix int64
 	if err := binary.Read(conn, binary.BigEndian, &ix); err != nil {
 		return err
+	}
+
+	if ix < 0 {
+		result := int64(0)
+		if h.doneHandler() {
+			result = 1
+		}
+		return binary.Write(conn, binary.BigEndian, result)
+	}
+
+	if h.handler == nil {
+		return errors.New("not setup handler")
 	}
 
 	tx, err := h.handler(uint(ix))
