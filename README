@@ -1,0 +1,6 @@
+# Get started
+
+```
+make build
+N_PROCESS=200 make run
+```
