@@ -2,7 +2,6 @@ package p2p
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -17,30 +16,17 @@ type Host struct {
 	port        int
 	minPort     int
 	maxPort     int
-	orders      []int
-	idxOrder    int
+	pool        *ConnectionPool
 	handler     func(ix uint) (entity.Transaction, error)
 	doneHandler func() bool
 }
 
-func New(host string, port, minPort, maxPort int) (*Host, error) {
-	rand.Seed(time.Now().UnixNano())
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
-		return nil, err
+func New(host string, port int, minPort, maxPort int) *Host {
+	return &Host{
+		port:    port,
+		minPort: minPort,
+		maxPort: maxPort,
 	}
-
-	h := &Host{
-		listener: listener,
-		port:     port,
-		minPort:  minPort,
-		maxPort:  maxPort,
-		orders:   rand.Perm(maxPort - minPort),
-		idxOrder: 0,
-	}
-	go h.Serve()
-
-	return h, nil
 }
 
 func (h *Host) SetHandler(f func(ix uint) (entity.Transaction, error)) {
@@ -52,13 +38,15 @@ func (h *Host) SetDone(f func() bool) {
 }
 
 func (h *Host) Close() {
-	port := h.minPort
-
-	for port < h.maxPort {
-		log.Println("[INFO] Wait for process", port, "commits...")
-		if h.askDone(port) || port == h.port {
-			port++
-		} else {
+	nConn := h.pool.Len()
+	for i := 0; i < nConn; i++ {
+		conn, port := h.pool.Get(i)
+		for {
+			log.Println("[INFO] Wait for process", port, "commits...")
+			if h.askDone(conn) {
+				conn.Close()
+				break
+			}
 			time.Sleep(time.Second)
 		}
 	}
@@ -67,15 +55,29 @@ func (h *Host) Close() {
 	h.listener.Close()
 }
 
-func (h *Host) Serve() error {
-	for {
-		conn, err := h.listener.Accept()
-		if err != nil {
-			return err
-		}
-
-		go h.handleConnection(conn)
+func (h *Host) ListenAndAccept() error {
+	rand.Seed(time.Now().UnixNano())
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", h.port))
+	if err != nil {
+		return err
 	}
+
+	h.listener = listener
+	go func() {
+		for {
+			conn, err := h.listener.Accept()
+			if err != nil {
+				log.Println("[WARNING] Cannot accept connection:", err)
+				return
+			}
+			go h.handleConnection(conn)
+		}
+	}()
+
+	time.Sleep(2 * time.Second)
+	h.pool = newConnectionPool(h.port, h.minPort, h.maxPort)
+
+	return nil
 }
 
 func (h *Host) Ask(k, ix uint) ([]entity.Transaction, error) {
@@ -99,22 +101,7 @@ func (h *Host) Ask(k, ix uint) ([]entity.Transaction, error) {
 }
 
 func (h *Host) askOne(ix uint64) (entity.Transaction, error) {
-	if h.idxOrder >= len(h.orders) {
-		h.idxOrder = 0
-		h.orders = rand.Perm(h.maxPort - h.minPort)
-	}
-
-	port := h.orders[h.idxOrder] + h.minPort
-	h.idxOrder++
-
-	if port == h.port {
-		return entity.Transaction{}, errors.New("self connection")
-	}
-
-	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
-	if err != nil {
-		return entity.Transaction{}, err
-	}
+	conn, port := h.pool.Random()
 
 	if err := binary.Write(conn, binary.BigEndian, &ix); err != nil {
 		return entity.Transaction{}, err
@@ -129,53 +116,53 @@ func (h *Host) askOne(ix uint64) (entity.Transaction, error) {
 	return entity.Transaction{Value: int(value)}, nil
 }
 
-func (h *Host) askDone(port int) bool {
-	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
-	if err != nil {
+func (h *Host) askDone(conn net.Conn) bool {
+	value := int64(-1)
+	if err := binary.Write(conn, binary.BigEndian, value); err != nil {
 		return true
 	}
 
-	value := int64(-1)
-	if err := binary.Write(conn, binary.BigEndian, value); err != nil {
-		return false
-	}
-
 	if err := binary.Read(conn, binary.BigEndian, &value); err != nil {
-		return false
+		return true
 	}
 
 	return value == 1
 }
 
-func (h *Host) handleConnection(conn net.Conn) error {
-	defer conn.Close()
-
-	var ix int64
-	if err := binary.Read(conn, binary.BigEndian, &ix); err != nil {
-		return err
-	}
-
-	if ix < 0 {
-		result := int64(0)
-		if h.doneHandler() {
-			result = 1
+func (h *Host) handleConnection(conn net.Conn) {
+	for {
+		var ix int64
+		if err := binary.Read(conn, binary.BigEndian, &ix); err != nil {
+			log.Println("[WARNING] Cannot read from conn:", err)
+			conn.Close()
+			break
 		}
-		return binary.Write(conn, binary.BigEndian, result)
-	}
 
-	if h.handler == nil {
-		return errors.New("not setup handler")
-	}
+		if ix < 0 {
+			result := int64(0)
+			if h.doneHandler() {
+				result = 1
+			}
+			if err := binary.Write(conn, binary.BigEndian, result); err != nil {
+				log.Println("[WARNING] Cannot write done to conn:", err)
+			}
+			continue
+		}
 
-	tx, err := h.handler(uint(ix))
-	if err != nil {
-		log.Println("[WARNING] Got a error when answer transaction ", ix)
-		return err
-	}
+		if h.handler == nil {
+			log.Println("[WARNING] Not setup handler, not handle connection")
+		}
 
-	if err := binary.Write(conn, binary.BigEndian, int64(tx.Value)); err != nil {
-		return err
-	}
+		tx, err := h.handler(uint(ix))
+		if err != nil {
+			log.Println("[WARNING] Got a error when answer transaction ", ix)
+			continue
+		}
 
-	return nil
+		if err := binary.Write(conn, binary.BigEndian, int64(tx.Value)); err != nil {
+			log.Println("[WARNING] Cannot write transaction to conn:", err)
+			continue
+		}
+
+	}
 }

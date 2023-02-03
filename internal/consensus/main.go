@@ -8,7 +8,6 @@ import (
 	"github.com/huykingsofm/snowball-concensus/internal/usecase/consensus"
 	"github.com/huykingsofm/snowball-concensus/pkg/p2p"
 	"github.com/huykingsofm/snowball-concensus/pkg/transaction"
-	"github.com/xybor-x/xycond"
 )
 
 type App struct {
@@ -27,14 +26,15 @@ func New(folder string, port, minPort, maxPort int, n, k, alpha, beta uint) App 
 		panic(fmt.Sprintf("invalid port %d not in %d-%d", port, minPort, maxPort))
 	}
 
-	host, err := p2p.New("localhost", port, minPort, maxPort)
-	xycond.AssertNil(err)
+	host := p2p.New("localhost", port, minPort, maxPort)
 
 	repo := transaction.New(folder+"/"+strconv.Itoa(port)+".result", n)
 	usecase := consensus.New(repo, host, k, alpha, beta)
 
 	host.SetHandler(usecase.Answer)
 	host.SetDone(repo.Done)
+
+	host.ListenAndAccept()
 
 	return App{
 		host:     host,
